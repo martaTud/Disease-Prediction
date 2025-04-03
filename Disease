@@ -1,0 +1,51 @@
+	
+import itertools
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.model_selection import train_test_split
+
+from sklearn.utils import shuffle
+from sklearn.feature_selection import mutual_info_classif as MIF
+import imblearn
+from imblearn.over_sampling import SMOTE, BorderlineSMOTE, ADASYN, RandomOverSampler, SVMSMOTE, KMeansSMOTE
+from imblearn.combine import SMOTETomek, SMOTEENN
+from imblearn.under_sampling import RandomUnderSampler
+import random
+import os
+# chain()可以把一组迭代对象串联起来，形成一个更大的迭代器
+from itertools import chain
+from tensorflow import keras
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras import optimizers, layers, losses, metrics
+from tensorflow.keras.initializers import glorot_normal, he_normal
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Embedding, Lambda, multiply
+from sklearn.metrics import log_loss, roc_auc_score, accuracy_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler
+from sklearn.svm import OneClassSVM
+from sklearn.ensemble import IsolationForest
+
+from tensorflow.keras import backend as K
+from tensorflow.keras.regularizers import l2
+
+from deepctr.inputs import get_dense_input, create_embedding_matrix, embedding_lookup, get_dense_input, varlen_embedding_lookup, \
+    get_varlen_pooling_list, mergeDict
+from deepctr.layers.sequence import SequencePoolingLayer
+
+from deepctr.feature_column import  SparseFeat, DenseFeat, VarLenSparseFeat, get_feature_names, build_input_features, get_linear_logit, DEFAULT_GROUP_NAME, input_from_feature_columns
+from deepctr.layers.core import PredictionLayer, DNN
+from deepctr.layers.interaction import FM, FEFMLayer, BiInteractionPooling, AFMLayer, CIN, InteractingLayer, FwFMLayer, InnerProductLayer, OutterProductLayer
+from deepctr.layers.utils import concat_func, add_func, Hash, NoMask, combined_dnn_input, reduce_sum, softmax
+from tensorflow.keras.layers import Layer
+from tensorflow.keras.initializers import Zeros, glorot_normal, RandomNormal
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['font.family'] = 'Arial'
+matplotlib.rcParams['font.size'] = 12
+np.random.seed(1024) # seed是一个固定的整数即可
+random.seed(1024)
+os.environ['PYTHONHASHSEED'] = str(1024)
