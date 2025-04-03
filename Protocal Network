@@ -1,0 +1,240 @@
+from PIL import Image
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, MaxPool2D, Flatten
+from tensorflow.keras.optimizers import Adam
+import os
+import glob
+import matplotlib.pyplot as plt
+n_epochs = 150
+n_episodes = 100
+n_way = 10
+n_shot = 5
+n_query = 15
+n_examples = 350
+lr = 0.001
+width, height, channels = 84, 84, 3
+lr = tf.keras.optimizers.schedules.ExponentialDecay(0.001, decay_steps = 2000, decay_rate = 0.5)
+optimizer = Adam(lr)
+train_dataset = np.load('train.npy')
+n_classes = train_dataset.shape[0]
+print(train_dataset.shape)
+(64, 350, 84, 84, 3)
+def calc_euclidian_dists(x, y):
+    """
+    Calculate euclidian distance between two 3D tensors.
+
+    Args:
+        x (tf.Tensor):
+        y (tf.Tensor):
+
+    Returns (tf.Tensor): 2-dim tensor with distances.
+
+    """
+    n = x.shape[0]
+    m = y.shape[0]
+    x = tf.tile(tf.expand_dims(x, 1), [1, m, 1])
+    y = tf.tile(tf.expand_dims(y, 0), [n, 1, 1])
+    return tf.reduce_mean(tf.math.abs(x-y), axis = 2)
+# def regularized_padded_conv(*args, **kwargs):
+#     return layers.Conv2D(*args, **kwargs, padding='same', use_bias=False,
+#                          kernel_initializer='he_normal',
+#                          kernel_regularizer=regularizers.l2(5e-4))
+# class SpatialAttention(layers.Layer):
+#     def __init__(self, kernel_size=7):
+#         super(SpatialAttention, self).__init__()
+#         self.conv1 = regularized_padded_conv(1, kernel_size=kernel_size, strides=1, activation='sigmoid')
+
+#     def call(self, inputs):
+#         avg_out = tf.reduce_mean(inputs, axis=3)
+#         max_out = tf.reduce_max(inputs, axis=3)
+#         out = tf.stack([avg_out, max_out], axis=-1)             # 创建一个维度,拼接到一起concat。
+#         out = self.conv1(out)
+
+#         return out
+class Prototypical(Model):
+    """
+    Implemenation of Prototypical Network.
+    """
+    def __init__(self, n_support, n_query, w, h, c):
+        """
+        Args:
+            n_support (int): number of support examples.
+            n_query (int): number of query examples.
+            w (int): image width .
+            h (int): image height.
+            c (int): number of channels.
+        """
+        super(Prototypical, self).__init__()
+        self.w, self.h, self.c = w, h, c
+
+        # Encoder as ResNet like CNN with 4 blocks
+        self.encoder = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool2D((2, 2)),
+            
+            tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool2D((2, 2)),
+
+            tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool2D((2, 2)),
+
+            tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool2D((2, 2)),
+            
+            tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.ReLU(),
+            tf.keras.layers.MaxPool2D((2, 2)), Flatten()]
+        )
+#         self.conv1 = tf.keras.layers.Conv2D(filters=32, kernel_size=3, padding='same')
+#         self.conv2 = tf.keras.layers.Conv2D(filters=64, kernel_size=3, padding='same')
+#         self.conv3 = tf.keras.layers.Conv2D(filters=1, kernel_size=3, padding='same')
+#         self.drop = tf.keras.layers.Dropout()
+#     def feature_attention(self, z_prototypes):
+#         score = tf.nn.relu(self.conv1(z_prototypes))
+#         score = tf.nn.relu(self.conv2(score)) 
+#         score = self.drop(score)
+#         score = tf.nn.relu(self.conv_3(score))
+#         score = tf.reshape(score, [n_class, n_support, z.shape[-1]])
+#         return score
+
+    def call(self, support, query):
+        n_class = support.shape[0]
+        n_support = support.shape[1]
+        n_query = query.shape[1]
+#         fea_att_score = feature_attention(self, support, n_class, n_support):
+        y = np.tile(np.arange(n_class)[:, np.newaxis], (1, n_query))
+        y_onehot = tf.cast(tf.one_hot(y, n_class), tf.float32)
+
+        # correct indices of support samples (just natural order)
+        target_inds = tf.reshape(tf.range(n_class), [n_class, 1])
+        target_inds = tf.tile(target_inds, [1, n_query])
+
+        # merge support and query to forward through encoder
+        cat = tf.concat([
+            tf.reshape(support, [n_class * n_support,
+                                 self.w, self.h, self.c]),
+            tf.reshape(query, [n_class * n_query,
+                               self.w, self.h, self.c])], axis=0)
+        z = self.encoder(cat)
+
+        # Divide embedding into support and query
+        z_prototypes = tf.reshape(z[:n_class * n_support],
+                                  [n_class, n_support, z.shape[-1]])
+        # Prototypes are means of n_support examples
+        z_prototypes = tf.math.reduce_mean(z_prototypes, axis=1)
+        z_query = z[n_class * n_support:]
+
+        # Calculate distances between query and prototypes
+        dists = calc_euclidian_dists(z_query, z_prototypes)
+
+        # log softmax of calculated distances
+        log_p_y = tf.nn.log_softmax(-dists, axis=-1)
+        log_p_y = tf.reshape(log_p_y, [n_class, n_query, -1])
+        
+        loss = -tf.reduce_mean(tf.reshape(tf.reduce_sum(tf.multiply(y_onehot, log_p_y), axis=-1), [-1]))
+        eq = tf.cast(tf.equal(
+            tf.cast(tf.argmax(log_p_y, axis=-1), tf.int32), 
+            tf.cast(y, tf.int32)), tf.float32)
+        acc = tf.reduce_mean(eq)
+        return loss, acc
+---------------------------------------------------------------------------
+NameError                                 Traceback (most recent call last)
+<ipython-input-1-2c5514e0f420> in <module>
+     31 
+     32 #         return out
+---> 33 class Prototypical(Model):
+     34     """
+     35     Implemenation of Prototypical Network.
+
+NameError: name 'Model' is not defined
+train_loss = []
+train_acc = []
+model = Prototypical(n_shot, n_query, width, height, channels)
+for ep in range(n_epochs):
+    all_loss = 0
+    all_acc = 0
+    for epi in range(n_episodes):
+        epi_classes = np.random.permutation(n_classes)[:n_way]
+        support = np.zeros([n_way, n_shot, height, width, channels], dtype=np.float32)
+        query = np.zeros([n_way, n_query, height, width, channels], dtype=np.float32)
+        for i, epi_cls in enumerate(epi_classes):
+            selected = np.random.permutation(n_examples)[:n_shot + n_query]
+            support[i] = train_dataset[epi_cls, selected[:n_shot]]
+            query[i] = train_dataset[epi_cls, selected[n_shot:]]
+            # support = np.expand_dims(support, axis=-1)
+            # query = np.expand_dims(query, axis=-1)
+        with tf.GradientTape() as tape:
+            loss, acc = model(support, query)
+        gradients = tape.gradient(loss, model.trainable_variables)
+        optimizer.apply_gradients(
+            zip(gradients, model.trainable_variables))
+        if (epi+1) % 50 == 0:
+            print('[epoch {}/{}, episode {}/{}] => loss: {:.5f}, acc: {:.5f}'.format(ep+1, n_epochs, epi+1, n_episodes, loss, acc))
+        all_loss += loss.numpy()
+        all_acc += acc.numpy()
+    train_loss.append(all_loss / n_episodes)
+    train_acc.append(all_acc / n_episodes)     
+---------------------------------------------------------------------------
+FileNotFoundError                         Traceback (most recent call last)
+<ipython-input-7-5f59f579ce74> in <module>
+----> 1 train_dataset = np.load('D:/BaiduNetdiskDownload/train.npy')
+      2 n_classes = train_dataset.shape[0]
+      3 print(train_dataset.shape)
+
+E:\Anaconda\lib\site-packages\numpy\lib\npyio.py in load(file, mmap_mode, allow_pickle, fix_imports, encoding)
+    420         own_fid = False
+    421     else:
+--> 422         fid = open(os_fspath(file), "rb")
+    423         own_fid = True
+    424 
+
+FileNotFoundError: [Errno 2] No such file or directory: 'D:/BaiduNetdiskDownload/train.npy'
+# Load Test Dataset
+test_dataset = np.load('test.npy')
+n_test_classes = test_dataset.shape[0]
+print(test_dataset.shape)
+n_test_episodes = 600
+n_test_way = 5
+n_test_shot = 5
+n_test_query = 15
+print('Testing...')
+avg_acc = 0.
+all_loss = 0
+all_acc = 0
+test_loss = []
+test_acc = []
+for epi in range(n_test_episodes):
+    epi_classes = np.random.permutation(n_test_classes)[:n_test_way]
+    support = np.zeros([n_test_way, n_test_shot, height, width, channels], dtype=np.float32)
+    query = np.zeros([n_test_way, n_test_query, height, width, channels], dtype=np.float32)
+    for i, epi_cls in enumerate(epi_classes):
+        selected = np.random.permutation(n_examples)[:n_test_shot + n_test_query]
+        support[i] = test_dataset[epi_cls, selected[:n_test_shot]]
+        query[i] = test_dataset[epi_cls, selected[n_test_shot:]]
+    loss, acc = model(support, query)
+    avg_acc += acc
+    all_loss += loss.numpy()
+    all_acc += acc.numpy()
+    if (epi+1) % 50 == 0:
+        print('[test episode {}/{}] => loss: {:.5f}, acc: {:.5f}'.format(epi+1, n_test_episodes, loss, acc))
+        test_loss.append(all_loss / 50)
+        test_acc.append(all_acc / 50)
+        all_acc = 0
+        all_loss = 0
+avg_acc /= n_test_episodes
+print('Average Test Accuracy: {:.5f}'.format(avg_acc))
+print(train_loss)
+print(train_acc)
+print(test_loss)
+print(test_acc)
