@@ -1,0 +1,33 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import OrdinalEncoder, MinMaxScaler
+from sklearn.impute import SimpleImputer
+import tensorflow as tf
+from tensorflow.keras.initializers import glorot_normal
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import log_loss
+import matplotlib.pyplot as plt
+import numpy as np
+data = pd.read_csv('E:/BaiduNetdiskDownload/论文/ALF_Data.csv')
+data.dropna(subset = ['Hepatitis'], inplace = True)
+for i in ['Weight', 'Height', 'Waist', 'Maximum Blood Pressure', 'Minimum Blood Pressure', 'Good Cholesterol', 'Bad Cholesterol']:
+    data.loc[:, i] = SimpleImputer(strategy = 'mean').fit_transform(data[i].values.reshape(-1, 1))
+for i in ['Obesity', 'Physical Activity', 'Education', 'Unmarried', 'Income', 'PoorVision', 'HyperTension', 'Family Hepatitis', 'Chronic Fatigue', 'ALF']:
+    data.loc[:, i] = SimpleImputer(strategy = 'most_frequent').fit_transform(data[i].values.reshape(-1, 1))
+data.loc[:, 'Body Mass Index'] = data['Weight'] / ((data['Height'] / 100) ** 2)
+data.loc[:, 'Total Cholesterol'] = data['Good Cholesterol'] + data['Bad Cholesterol']
+for i in ['Gender', 'Region', 'Source of Care']:
+    data.loc[:, i] = OrdinalEncoder().fit_transform(data[i].values.reshape(-1, 1))
+dense_features=['Age','Weight','Height',
+                'Body Mass Index','Waist','Maximum Blood Pressure',
+                'Minimum Blood Pressure','Good Cholesterol','Bad Cholesterol',
+                'Total Cholesterol']
+mms = MinMaxScaler(feature_range=(0, 1))
+data.loc[:, dense_features] = mms.fit_transform(data[dense_features])
+data.loc[:, 'Hepatitis'] = data['Hepatitis'].astype('int')
+train = data.iloc[:6000]
+test = data.iloc[6000:]
+Xtrain = train.loc[:, train.columns != 'Hepatitis']
+Ytrain = train.loc[:, 'Hepatitis']
+Xtest = test.loc[:, test.columns != 'Hepatitis']
+Ytest = test.loc[:, 'Hepatitis']
