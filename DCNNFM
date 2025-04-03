@@ -1,0 +1,142 @@
+import itertools
+import tensorflow as tf
+import numpy as np
+import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.utils import shuffle
+from sklearn.feature_selection import mutual_info_classif as MIF
+import random
+import os
+# chain()
+from itertools import chain
+from tensorflow import keras
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras import optimizers, layers, losses, metrics
+from tensorflow.keras.initializers import glorot_normal, he_normal
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.layers import Dense, Embedding, Lambda, multiply, Flatten, Concatenate
+from sklearn.metrics import log_loss, roc_auc_score, accuracy_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler
+
+from tensorflow.keras import backend as K
+from tensorflow.keras.regularizers import l2
+
+from deepctr.inputs import get_dense_input, create_embedding_matrix, embedding_lookup, get_dense_input, varlen_embedding_lookup, \
+    get_varlen_pooling_list, mergeDict
+from deepctr.layers.sequence import SequencePoolingLayer, Transformer, AttentionSequencePoolingLayer
+
+from deepctr.feature_column import  SparseFeat, DenseFeat, VarLenSparseFeat, get_feature_names, build_input_features, get_linear_logit, DEFAULT_GROUP_NAME, input_from_feature_columns
+from deepctr.layers.core import PredictionLayer, DNN
+from deepctr.layers.interaction import FM, FEFMLayer, BiInteractionPooling, AFMLayer, CIN, InteractingLayer, FwFMLayer, InnerProductLayer, OutterProductLayer, FGCNNLayer, CrossNet,  CrossNetMix
+from deepctr.layers.utils import concat_func, add_func, Hash, NoMask, combined_dnn_input, reduce_sum, softmax
+from tensorflow.keras.layers import Layer
+from tensorflow.keras.initializers import Zeros, glorot_normal, RandomNormal
+import matplotlib.pyplot as plt
+import matplotlib
+def DCNNFM(linear_feature_columns, dnn_feature_columns, fm_group=[DEFAULT_GROUP_NAME], cross_num=2, cross_parameterization='vector',
+        dnn_hidden_units=(256, 128, 64), l2_reg_linear=1e-5, l2_reg_embedding=1e-5,
+        l2_reg_cross=1e-5, attention_factor=8, l2_reg_att=1e-5, afm_dropout=0, l2_reg_dnn=0, seed=1024, dnn_dropout=0,bi_dropout=0, dnn_use_bn=False,
+        dnn_activation='relu', task='binary'):
+    """Instantiates the Deep&Cross Network architecture.
+
+    :param linear_feature_columns: An iterable containing all the features used by linear part of the model.
+    :param dnn_feature_columns: An iterable containing all the features used by deep part of the model.
+    :param cross_num: positive integet,cross layer number
+    :param cross_parameterization: str, ``"vector"`` or ``"matrix"``, how to parameterize the cross network.
+    :param dnn_hidden_units: list,list of positive integer or empty list, the layer number and units in each layer of DNN
+    :param l2_reg_linear: float. L2 regularizer strength applied to linear part
+    :param l2_reg_embedding: float. L2 regularizer strength applied to embedding vector
+    :param l2_reg_cross: float. L2 regularizer strength applied to cross net
+    :param l2_reg_dnn: float. L2 regularizer strength applied to DNN
+    :param seed: integer ,to use as random seed.
+    :param dnn_dropout: float in [0,1), the probability we will drop out a given DNN coordinate.
+    :param dnn_use_bn: bool. Whether use BatchNormalization before activation or not DNN
+    :param dnn_activation: Activation function to use in DNN
+    :param task: str, ``"binary"`` for  binary logloss or  ``"regression"`` for regression loss
+    :return: A Keras model instance.
+
+    """
+    if len(dnn_hidden_units) == 0 and cross_num == 0:
+        raise ValueError("Either hidden_layer or cross layer must > 0")
+
+    features = build_input_features(dnn_feature_columns)
+    inputs_list = list(features.values())
+
+    linear_logit = get_linear_logit(features, linear_feature_columns, seed=seed, prefix='linear',
+                                    l2_reg=l2_reg_linear)
+
+#     sparse_embedding_list, dense_value_list = input_from_feature_columns(features, dnn_feature_columns,
+#                                                                          l2_reg_embedding, seed)
+    group_embedding_dict, dense_value_list = input_from_feature_columns(features, dnn_feature_columns, l2_reg_embedding,
+                                                                        seed = seed, support_group=True)
+            
+#   dnn_input = combined_dnn_input(list(chain.from_iterable(group_embedding_dict.values())), dense_value_list)
+    sparse_embedding_list = list(chain.from_iterable(group_embedding_dict.values()))
+    fm_logit = add_func([FM()(concat_func(v, axis=1))
+                         for k, v in group_embedding_dict.items() if k in fm_group])
+#     afm_logit = add_func([AFMLayer(attention_factor, l2_reg_att, afm_dropout,
+#                                       seed)(list(v)) for k, v in group_embedding_dict.items() if k in fm_group])
+    fm_input = concat_func(sparse_embedding_list, axis=1)
+    bi_out = BiInteractionPooling()(fm_input)
+    if bi_dropout:
+        bi_out = tf.keras.layers.Dropout(bi_dropout)(bi_out, training=None)
+    dnn_input = combined_dnn_input([bi_out], dense_value_list)
+
+#     dnn_input = combined_dnn_input(sparse_embedding_list, dense_value_list)
+
+    if len(dnn_hidden_units) > 0 and cross_num > 0:  # Deep & Cross
+        deep_out = DNN(dnn_hidden_units, dnn_activation, l2_reg_dnn, dnn_dropout, dnn_use_bn, seed=seed)(dnn_input)
+        cross_out = CrossNet(cross_num, parameterization=cross_parameterization, l2_reg=l2_reg_cross)(dnn_input)
+        stack_out = Concatenate()([cross_out, deep_out])
+        final_logit = Dense(1, use_bias=False)(stack_out)
+    elif len(dnn_hidden_units) > 0:  # Only Deep
+        deep_out = DNN(dnn_hidden_units, dnn_activation, l2_reg_dnn, dnn_dropout, dnn_use_bn, seed=seed)(dnn_input)
+        final_logit = Dense(1, use_bias=False)(deep_out)
+    elif cross_num > 0:  # Only Cross
+        cross_out = CrossNet(cross_num, parameterization=cross_parameterization, l2_reg=l2_reg_cross)(dnn_input)
+        final_logit = Dense(1, use_bias=False)(cross_out)
+    else:  # Error
+        raise NotImplementedError
+    final_logit = add_func([linear_logit, final_logit])
+    output = PredictionLayer(task)(final_logit)
+
+    model = Model(inputs=inputs_list, outputs=output)
+    model.compile(optimizer=optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, epsilon=1e-08, decay=0.0), 
+                          loss=losses.BinaryCrossentropy(), 
+                          metrics=['AUC', 'binary_accuracy', 'Precision', 'Recall'])
+    return model
+metrics = []
+lrs = [1]
+for i in lrs:
+    metric = []
+    for j in range(1):
+        model = DCNNFM(linear_feature_columns, dnn_feature_columns, fm_group=[DEFAULT_GROUP_NAME], cross_num=2, cross_parameterization='vector',
+        dnn_hidden_units=(256, 128, 64), l2_reg_linear=1e-5, l2_reg_embedding=1e-5,
+        l2_reg_cross=1e-5, attention_factor=8, l2_reg_att=1e-5, afm_dropout=0, l2_reg_dnn=0, seed=1024, dnn_dropout=0,bi_dropout=0, dnn_use_bn=False,
+        dnn_activation='relu', task='binary')
+        input_train = deepfm_train
+        model.fit(input_train,
+                        label,
+                        validation_split=0.2,
+                        epochs=100,
+                        batch_size=128,
+                        shuffle = False,
+                        verbose = 1, 
+                        callbacks=[EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)],)
+        input_test = deepfm_test
+        ans_mtx = model.predict(input_test, batch_size=100)
+        loss, auc, acc, pre, rec = model.evaluate(input_test, label1)
+        metric.append([loss, auc, acc, pre, rec])
+    metric = np.array(metric)
+    print(metric)
+    metrics.append(metric)
+print(metrics)
+print(metrics)
+print(*zip(lrs, np.mean(metrics, axis = 1)))
+
+git add .
+git commit -m "Descripción del cambio"
+git push origin main
+
